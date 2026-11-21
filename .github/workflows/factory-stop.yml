@@ -1,0 +1,181 @@
+# The Actions half of a stop (messages design 7.2, unit 5). The factory's tokens may not
+# cancel a run or switch a workflow off (GitHub answers 403, records/SETUP_LOG.md line 130);
+# this workflow's own token may. It is started by the label `factory:stop`.
+#
+# Project stop (the label is on the control issue, which carries `factory:control`):
+#   labeled:   one comment `factory-stopped-workflows` with the active workflows, then each of
+#              them switched off except this file and factory-attention.yml, then every waiting
+#              or running run of the repository cancelled (except the runs of those two files).
+#   unlabeled: exactly the workflows of the newest such list switched on again.
+# Card stop (any other issue): the card's pull request branch is <prefix>-<issue number>.
+#   labeled:   that branch's waiting and running runs cancelled; their ids in one comment
+#              `factory-cancelled-runs`.
+#   unlabeled: the runs of the newest such list that ended as cancelled are run again.
+#
+# Safe to repeat: a list not yet restored is extended, never replaced and never written twice;
+# an empty list is not written. A lift restores every list not yet restored, then marks each
+# one `restored: <time>`, so an older stop's list is never used again and a lift whose run was
+# dropped leaves its list for the next lift. Lists are
+# read only from github-actions[bot], so a comment of anyone else cannot name what is run again.
+# A label on a pull request does not start this (GitHub sends `issues` events for issues only);
+# the factory puts `factory:stop` on the card (the issue).
+name: factory-stop
+on:
+  issues:
+    types: [labeled, unlabeled]
+permissions:
+  actions: write
+  issues: write
+  contents: read
+  pull-requests: read
+# One group per issue and label: the runs of one issue's stop and lift never overlap. GitHub
+# keeps only the newest waiting run of a group, which is the newest label change: and each run
+# acts on the label as it is NOW (read again at the start), not on the event that started it,
+# so a dropped middle run changes nothing (review of practice PR #65).
+concurrency:
+  group: factory-stop-${{ github.event.issue.number }}-${{ github.event.label.name }}
+  cancel-in-progress: false
+jobs:
+  stop:
+    if: github.event.label.name == 'factory:stop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          BRANCH_PREFIX: ${{ vars.FACTORY_BRANCH_PREFIX || 'factory/issue' }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            // The label as it is now decides, not the event (a later change may have come meanwhile).
+            const { data: now } = await github.rest.issues.get({ owner, repo, issue_number: issue.number });
+            const action = (now.labels || []).some((l) => (l.name || l) === 'factory:stop') ? 'labeled' : 'unlabeled';
+            const BOT = 'github-actions[bot]';
+            const KEEP_ON = ['factory-stop.yml', 'factory-attention.yml'];
+            const WAITING = ['queued', 'in_progress', 'waiting', 'requested', 'pending'];
+            const fileOf = (path) => (path || '').split('/').pop();
+            const isControl = (issue.labels || []).some((l) => l.name === 'factory:control');
+
+            // The bot's list comments with this marker, oldest first: [{comment, items}].
+            async function lists(marker) {
+              const comments = await github.paginate(github.rest.issues.listComments,
+                { owner, repo, issue_number: issue.number, per_page: 100 });
+              const found = [];
+              for (const c of comments) {
+                if (!c.user || c.user.login !== BOT) continue;
+                const body = c.body || '';
+                if (body.split('\n', 1)[0].trim() !== marker) continue;
+                const m = body.match(/```json\s*([\s\S]*?)```/);
+                try {
+                  found.push({ comment: c, items: m ? JSON.parse(m[1]) : [], restored: /\nrestored: /.test(body) });
+                } catch (e) { /* not ours */ }
+              }
+              return found;
+            }
+
+            // Every list not yet restored, as one list of unique items (by `key`), and a way to mark them.
+            async function unrestored(marker, key) {
+              const open = (await lists(marker)).filter((l) => !l.restored);
+              const items = [];
+              for (const l of open) for (const it of l.items) if (!items.some((x) => key(x) === key(it))) items.push(it);
+              const done = async () => {
+                for (const l of open) {
+                  await github.rest.issues.updateComment({ owner, repo, comment_id: l.comment.id,
+                    body: `${l.comment.body}\nrestored: ${new Date().toISOString()}` });
+                }
+              };
+              return { items, done };
+            }
+
+            // Write the list, or extend the one that is not restored yet. `key` names an item.
+            async function record(marker, items, key) {
+              const open = (await lists(marker)).filter((l) => !l.restored).pop();
+              const merged = open ? [...open.items] : [];
+              for (const it of items) if (!merged.some((x) => key(x) === key(it))) merged.push(it);
+              if (merged.length === 0) { core.info(`${marker}: nothing to list`); return; }
+              const body = `${marker}\n\`\`\`json\n${JSON.stringify(merged, null, 1)}\n\`\`\``;
+              if (open) {
+                if (merged.length !== open.items.length) {
+                  await github.rest.issues.updateComment({ owner, repo, comment_id: open.comment.id, body });
+                }
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body });
+              }
+              core.info(`${marker}: ${merged.length} listed`);
+            }
+
+            // Every waiting or running run (of one branch, when given), except this workflow's and the notices'.
+            async function liveRuns(branch) {
+              const runs = [];
+              for (const status of WAITING) {
+                const page = await github.paginate(github.rest.actions.listWorkflowRunsForRepo,
+                  { owner, repo, status, per_page: 100, ...(branch ? { branch } : {}) });
+                for (const r of page) {
+                  if (r.id === context.runId || KEEP_ON.includes(fileOf(r.path))) continue;
+                  if (!runs.some((x) => x.id === r.id)) runs.push(r);
+                }
+              }
+              return runs;
+            }
+
+            async function cancel(runs) {
+              for (const r of runs) {
+                try {
+                  await github.rest.actions.cancelWorkflowRun({ owner, repo, run_id: r.id });
+                  core.info(`cancelled run ${r.id} (${fileOf(r.path)})`);
+                } catch (e) {
+                  core.warning(`run ${r.id}: cancel answered ${e.status || e.message}`);   // ended meanwhile: 409
+                }
+              }
+            }
+
+            if (isControl && action === 'labeled') {
+              const all = await github.paginate(github.rest.actions.listRepoWorkflows, { owner, repo, per_page: 100 });
+              const active = all.filter((w) => w.state === 'active' && !KEEP_ON.includes(fileOf(w.path)))
+                .map((w) => ({ id: w.id, path: w.path }));
+              await record('factory-stopped-workflows', active, (w) => w.id);   // the list first, then the acts
+              for (const w of active) {
+                try {
+                  await github.rest.actions.disableWorkflow({ owner, repo, workflow_id: w.id });
+                  core.info(`switched off ${w.path}`);
+                } catch (e) {
+                  core.warning(`${w.path}: switch off answered ${e.status || e.message}`);
+                }
+              }
+              await cancel(await liveRuns(null));
+            } else if (isControl && action === 'unlabeled') {
+              const newest = await unrestored('factory-stopped-workflows', (w) => w.id);
+              if (!newest.items.length) { core.info('no list to restore: nothing to switch on'); return; }
+              for (const w of newest.items) {
+                try {
+                  await github.rest.actions.enableWorkflow({ owner, repo, workflow_id: w.id });
+                  core.info(`switched on ${w.path}`);
+                } catch (e) {
+                  core.warning(`${w.path}: switch on answered ${e.status || e.message}`);
+                }
+              }
+              await newest.done();
+            } else if (action === 'labeled') {
+              const branch = `${process.env.BRANCH_PREFIX}-${issue.number}`;
+              const runs = await liveRuns(branch);
+              await record('factory-cancelled-runs', runs.map((r) => r.id), (id) => id);
+              await cancel(runs);
+            } else {
+              const newest = await unrestored('factory-cancelled-runs', (id) => id);
+              if (!newest.items.length) { core.info('no list to restore: nothing to run again'); return; }
+              for (const id of newest.items) {
+                try {
+                  const { data: run } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: id });
+                  if (run.status !== 'completed' || run.conclusion !== 'cancelled') {
+                    core.info(`run ${id}: ${run.status}/${run.conclusion}, left alone`);   // already run again
+                    continue;
+                  }
+                  await github.rest.actions.reRunWorkflow({ owner, repo, run_id: id });
+                  core.info(`run ${id}: run again`);
+                } catch (e) {
+                  core.warning(`run ${id}: run again answered ${e.status || e.message}`);
+                }
+              }
+              await newest.done();
+            }

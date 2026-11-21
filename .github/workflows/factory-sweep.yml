@@ -1,0 +1,67 @@
+name: Factory sweep
+# D70 (owner yes, 12 Nov 2026; REGISTER_CUSTOM_PARTS): hourly supervision on a GitHub-hosted
+# runner, off the owner's PC, so it still reports when the PC, the self-hosted runner or OpenHands
+# is down. Reads GitHub only. Keeps one "Factory needs attention" issue assigned to the owner and
+# adds a new comment for each finding run (comments notify the owner; body edits do not).
+on:
+  schedule:
+    - cron: "43 * * * *"
+  workflow_dispatch:
+permissions:
+  issues: write
+  pull-requests: read
+concurrency:
+  group: factory-sweep
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Look for work that waits too long
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER_LOGIN: ashkonmousavi
+          TITLE: Factory needs attention
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+          hours() { echo $(( (now - $(date -u -d "$1" +%s)) / 3600 )); }
+          prs=$(gh api "repos/$REPO/pulls?state=open&per_page=100")
+          ready=$(gh api "repos/$REPO/issues?state=open&labels=ready-for-dev&per_page=100")
+          red=$(gh api "repos/$REPO/issues?state=open&labels=red-main&per_page=20")
+          open_issues=$(gh api "repos/$REPO/issues?state=open&per_page=100")
+          findings=""
+          while IFS=, read -r n t; do
+            if [ -n "$n" ] && ! jq -e --arg b "factory/issue-$n" 'any(.[]; .head.ref == $b)' <<<"$prs" >/dev/null && [ "$(hours "$t")" -ge 2 ]; then
+              findings+="- Issue #$n is ready for a builder but has no pull request after $(hours "$t") h."$'\n'
+            fi
+          done < <(jq -r '.[] | select(.pull_request | not) | "\(.number),\(.updated_at)"' <<<"$ready")
+          while IFS=, read -r n t; do
+            if [ -n "$n" ] && [ "$(hours "$t")" -ge 3 ]; then
+              findings+="- Pull request #$n has had no activity for $(hours "$t") h."$'\n'
+            fi
+          done < <(jq -r '.[] | select(.head.ref | startswith("factory/issue")) | "\(.number),\(.updated_at)"' <<<"$prs")
+          while read -r n; do
+            if [ -n "$n" ]; then
+              findings+="- Pull request #$n is marked factory-stuck."$'\n'
+            fi
+          done < <(jq -r '.[] | select(any(.labels[]; .name == "factory-stuck")) | .number' <<<"$prs")
+          while IFS=, read -r n t; do
+            if [ -n "$n" ] && [ "$(hours "$t")" -ge 1 ]; then
+              findings+="- Main is red: repair issue #$n has been open for $(hours "$t") h."$'\n'
+            fi
+          done < <(jq -r '.[] | "\(.number),\(.created_at)"' <<<"$red")
+          tracker=$(jq -r --arg t "$TITLE" '[.[] | select(.title == $t and (.pull_request | not))][0].number // empty' <<<"$open_issues")
+          run_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"
+          if [ -n "$findings" ]; then
+            body="Hourly factory check found:"$'\n'"$findings"$'\n'"Run: $run_url"
+            if [ -z "$tracker" ]; then
+              gh issue create -R "$REPO" --title "$TITLE" --assignee "$OWNER_LOGIN" --body "$body"
+            else
+              gh issue comment "$tracker" -R "$REPO" --body "$body"
+            fi
+          elif [ -n "$tracker" ]; then
+            gh issue close "$tracker" -R "$REPO" -c "Hourly factory check: nothing waits too long now. Run: $run_url"
+          fi
+          printf 'Findings:\n%s\n' "${findings:-none}"

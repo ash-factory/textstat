@@ -1,0 +1,128 @@
+name: CI
+# The rust-cli kind's checks (project kinds design 1.6, 1.8). Required on pull requests: test, guard (guard.yml),
+# evidence-replay; on main: test, build (.github/factory.json). The runners are containers with no Rust: each job
+# installs the pinned toolchain, the same 1.95.0 the building machines show their builders (K3).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/10 * * * *"   # main checked every 10 minutes (red main with no new commit, P-20: repair issue within 60 min)
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  RUST_VERSION: "1.95.0"
+  TRYCMD_VERSION: "1.2.1"
+  CARGO_TERM_COLOR: never
+jobs:
+  test:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          command -v cc >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev; }
+          if ! cargo --version 2>/dev/null | grep -q "^cargo $RUST_VERSION "; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" -c rustfmt,clippy
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+        env:
+          APP_COMMIT: ${{ github.sha }}
+      - run: cargo test
+        env:
+          APP_COMMIT: ${{ github.sha }}
+  evidence-replay:
+    # Replays this pull request's own transcripts at its head (design 1.6). The replayer is .github/evidence/replay.rs,
+    # copied into tests/ here, so a builder's change of tests/ or Cargo.toml cannot empty or skip it. No job-level `if`:
+    # a skipped run would never let the watchdog merge; on main the job says so and passes.
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: The pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          command -v cc >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev; }
+          if ! cargo --version 2>/dev/null | grep -q "^cargo $RUST_VERSION "; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" -c rustfmt,clippy
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Replay the card's transcripts
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APP_COMMIT: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then echo "Not a pull request: transcripts are replayed on pull requests only."; exit 0; fi
+          changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -E '^evidence/[^/]+/[0-9]+-[^/]+-pass\.md$' || true)
+          if [ -z "$changed" ]; then echo "This pull request adds no transcript: nothing to replay."; exit 0; fi
+          bad=$(for f in $changed; do grep -n -E '^[[:space:]]*\.\.\.[[:space:]]*$' "$f" | sed "s|^|$f:|"; done || true)
+          if [ -n "$bad" ]; then
+            echo "::error::A transcript hides output with a '...' line; only '[..]' inside a line is allowed:"
+            echo "$bad"; exit 1
+          fi
+          cp .github/evidence/replay.rs tests/factory_evidence_replay.rs
+          cargo add --dev "trycmd@=$TRYCMD_VERSION"
+          for folder in $(printf '%s\n' $changed | xargs -n1 dirname | sort -u); do
+            echo "replaying $folder/*-pass.md"
+            EVIDENCE_GLOB="$folder/*-pass.md" cargo test --test factory_evidence_replay
+          done
+  build:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          command -v cc >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev; }
+          if ! cargo --version 2>/dev/null | grep -q "^cargo $RUST_VERSION "; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" -c rustfmt,clippy
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - run: cargo build --release
+        env:
+          APP_COMMIT: ${{ github.sha }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: "textstat-${{ github.sha }}"
+          path: "target/release/textstat"
+          if-no-files-found: error
+  red-main-repair:
+    # D24 (owner-approved custom part, REGISTER_CUSTOM_PARTS): when CI on main fails,
+    # open ONE repair issue that the builder station takes first (priority:high).
+    # Held PRs need no action here: builders update their own PRs (AGENTS.md).
+    needs: [test, build]
+    if: failure() && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, factory]
+    permissions:
+      issues: write
+    concurrency:
+      group: red-main-repair
+      cancel-in-progress: false
+    steps:
+      - name: Open one red-main repair issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$REPO"
+          # A failed lookup must stop the job (loud red run), never count as "no issue open".
+          list=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" "$api/issues?state=open&labels=red-main")
+          open=$(printf '%s' "$list" | grep -c '"number":' || true)
+          if [ "$open" != "0" ]; then echo "A red-main repair issue is already open; nothing to do."; exit 0; fi
+          body="main is red: CI failed on main at ${SHA:0:7} ($RUN_URL). Every other pull request is blocked until main is green again.\n\nRepair card: find the failing test or step in that run, fix the cause with the smallest change, and make the full suite pass with the test command in AGENTS.md. Do not change tests/acceptance/, AGENTS.md or .github/; if one of them is the cause, say so in the pull request."
+          printf '{"title":"Repair: main is red (%s)","body":"%s","labels":["red-main","priority:high","ready-for-dev"]}' "${SHA:0:7}" "$body" > /tmp/red-main-issue.json
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" "$api/issues" -d @/tmp/red-main-issue.json | grep -m1 '"html_url"'

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "rust-cli",
+  "version": "1.0.0",
+  "description": "The software factory's Rust command-line kind pack: a library with a command, proved by transcripts that CI replays; its tests run before a builder stops. Vendored into a project at .agents/plugins/rust-cli/ by project_setup.py (project kinds design 1.2, 1.8)."
+}

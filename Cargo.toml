@@ -1,0 +1,15 @@
+[package]
+name = "textstat"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "textstat"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,34 @@
+name: Guard
+# D63a guard (owner-approved custom part, REGISTER_CUSTOM_PARTS): a builder branch
+# (prefix factory/issue, the official developer setting) may not change the planner's
+# acceptance tests, the project rules file or CI files. Builder tokens have no
+# Workflows permission, so a builder cannot edit this file either.
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Builders keep out of protected files
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$HEAD_REF" in
+            factory/issue*) ;;
+            *) echo "Not a builder branch ($HEAD_REF): nothing to check."; exit 0 ;;
+          esac
+          bad=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -E '^(tests/acceptance/|AGENTS\.md$|\.github/|\.agents/|\.openhands/)' \
+                | grep -v -E '^\.agents/skills/verify-[^/]+/features/' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::A builder branch changed protected files (planner tests, rules file, CI, skills or setup). Only the planner or keeper may change them:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "No protected files changed."

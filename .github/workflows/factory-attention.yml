@@ -1,0 +1,80 @@
+# The owner's notices (messages design 7.7, unit 10). When anything gets the label
+# `needs-owner`, github-actions[bot] comments on the issue "Factory needs attention":
+# a link, the title, and the newest comment of whoever set the label (the factory's
+# reason). That issue is assigned to the owner and kept closed: GitHub still notifies
+# the assignee of a comment on a closed issue, and the open list stays clean.
+# The issue is made here when it is missing (found by its label `factory:attention`).
+# Only `needs-owner` rings the owner; a worker's question goes to the orchestrator.
+# A label on a pull request comes as `pull_request_target` (no code is checked out here).
+name: factory-attention
+on:
+  issues:
+    types: [labeled]
+  pull_request_target:
+    types: [labeled]
+permissions:
+  issues: write
+  pull-requests: read
+# No `concurrency:` group: GitHub keeps only one waiting run per group and cancels the
+# others, which would lose notices. Two labels in the same second can make the issue twice
+# only on the very first notice; the newest one is then used.
+# The label test is on the step, not the job: a job skipped by its `if` ends the whole run
+# "skipped", and OpenHands' delivery watchdog merges a pull request only when every run on its
+# head ended "success" (catalogue `github-delivery-watchdog/scripts/worker.py` `ci_passed`);
+# a skipped step leaves the run "success". Seen 19 Nov: PR #73 approved and green, never merged.
+jobs:
+  notice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: github.event.label.name == 'needs-owner'
+        uses: actions/github-script@v7
+        env:
+          OWNER_LOGIN: ashkonmousavi
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const TITLE = 'Factory needs attention';
+            const LABEL = 'factory:attention';
+            const item = context.payload.issue || context.payload.pull_request;
+            const setBy = context.payload.sender ? context.payload.sender.login : '';
+
+            // The attention issue: found by its label and title, in any state, or made.
+            // The hourly sweep (factory-sweep.yml) keeps an OPEN issue of the same title while it has
+            // findings and looks for it among open issues only: when one is open, the notice goes
+            // there and it is left open; otherwise the factory's own closed one is used.
+            const open = (await github.paginate(github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 })).filter((i) => i.title === TITLE && !i.pull_request);
+            const found = await github.paginate(github.rest.issues.listForRepo,
+              { owner, repo, labels: LABEL, state: 'all', per_page: 100 });
+            let attention = open.sort((a, b) => a.number - b.number)[0]
+              || found.filter((i) => i.title === TITLE && !i.pull_request).sort((a, b) => b.number - a.number)[0];
+            const sweeps = Boolean(open.length);
+            if (!attention) {
+              ({ data: attention } = await github.rest.issues.create({
+                owner, repo, title: TITLE, labels: [LABEL], assignees: [process.env.OWNER_LOGIN],
+                body: 'The factory\'s notice channel to the owner. Every time an issue or pull request of this '
+                    + 'repository gets the label `needs-owner`, a comment here links to it with the reason. '
+                    + 'This issue is kept closed on purpose: its assignee is still notified of each comment.',
+              }));
+              core.info(`made the attention issue #${attention.number}`);
+            }
+            if (attention.state !== 'closed' && !sweeps) {
+              await github.rest.issues.update({ owner, repo, issue_number: attention.number, state: 'closed' });
+            }
+
+            // The reason: the newest comment on the item by whoever set the label.
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number: item.number, per_page: 100 });
+            const reason = comments.filter((c) => c.user && c.user.login === setBy).pop();
+            let text = (reason ? reason.body : '') || '';
+            if (text.length > 1500) text = text.slice(0, 1500) + ' ...';
+            const quoted = text ? text.split('\n').map((l) => '> ' + l).join('\n') : '_(no comment of the factory on it)_';
+
+            const kind = context.payload.pull_request ? 'Pull request' : 'Issue';
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: attention.number,
+              body: `**${kind} #${item.number}: ${item.title}** needs the owner.\n${item.html_url}\n\n`
+                  + `Label set by ${setBy || 'unknown'}. Reason:\n${quoted}`,
+            });
+            core.info(`notice for #${item.number} written on #${attention.number}`);

@@ -1,0 +1,33 @@
+name: Runner probe
+# One job on one named self-hosted runner, with the same steps as ci.yml's test job: a new
+# runner gets the label `factory` (and with it the real CI jobs) only after this passed on it
+# (factory/tools/runner.py probe, then runner.py join).
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "The runner's own machine label (pc, server, laptop)"
+        required: true
+permissions:
+  contents: read
+env:
+  RUST_VERSION: "1.95.0"
+jobs:
+  probe:
+    runs-on: [self-hosted, "${{ inputs.label }}"]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          command -v cc >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev; }
+          if ! cargo --version 2>/dev/null | grep -q "^cargo $RUST_VERSION "; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" -c rustfmt,clippy
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: echo "runner ${RUNNER_NAME} on $(uname -m), $(nproc) cores, $(cargo --version)"

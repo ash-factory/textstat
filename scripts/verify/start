@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Build this clone's commit for a check on the running build (the skill verify-cli), and say where it is.
+#
+#   scripts/verify/start
+#   stdout, one line:  bin=target/debug/textstat commit=<sha>
+#   exit 0  built; `<bin> --version` answers "textstat <HEAD sha>"
+#   exit 2  an uncommitted change outside evidence/ and .verify/; nothing built (a check is of a commit)
+#   exit 1  the build failed (its last lines on stderr), or the build does not name HEAD
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+changed="$(git status --porcelain --untracked-files=all -- . ':(exclude)evidence' ':(exclude).verify' ':(exclude).factory-cache' | head -1)"
+if [ -n "$changed" ]; then
+  echo "uncommitted change outside evidence/ and .verify/: ${changed:3} (commit it first: a check is of a commit)" >&2
+  exit 2
+fi
+commit="$(git rev-parse HEAD)"
+mkdir -p .verify
+if ! APP_COMMIT="$commit" cargo build --quiet >.verify/build.log 2>&1; then
+  tail -n 20 .verify/build.log >&2
+  exit 1
+fi
+bin="target/debug/textstat"
+if [ "$("$bin" --version)" != "textstat $commit" ]; then
+  echo "the build answers '$("$bin" --version)', not 'textstat $commit'" >&2
+  exit 1
+fi
+echo "bin=$bin commit=$commit"

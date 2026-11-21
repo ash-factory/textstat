@@ -1,0 +1,26 @@
+{
+  "session_start": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash \"${PLUGIN_ROOT:-.agents/plugins/rust-cli}/dev.openhands/hooks/setup.sh\"",
+          "timeout": 20
+        }
+      ]
+    }
+  ],
+  "stop": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash \"${PLUGIN_ROOT:-.agents/plugins/rust-cli}/dev.openhands/hooks/stop.sh\"",
+          "timeout": 180
+        }
+      ]
+    }
+  ]
+}
