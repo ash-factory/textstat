@@ -13,3 +13,6 @@ name = "textstat"
 path = "src/main.rs"
 
 [dependencies]
+
+[dev-dependencies]
+serde_json = "1.0"
