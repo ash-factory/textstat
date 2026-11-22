@@ -22,6 +22,18 @@ pub struct Counts {
     pub chars: usize,
 }
 
+impl Counts {
+    /// Format the counts as a JSON object with integer values.
+    pub fn to_json(&self) -> String {
+        let Self {
+            lines,
+            words,
+            chars,
+        } = self;
+        format!(r#"{{"lines":{lines},"words":{words},"chars":{chars}}}"#)
+    }
+}
+
 /// Count lines, whitespace-separated words, and Unicode scalar values in a UTF-8 file.
 pub fn count_file(path: &Path) -> io::Result<Counts> {
     fs::read_to_string(path).map(|text| count(&text))
