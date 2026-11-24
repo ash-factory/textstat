@@ -176,9 +176,12 @@ def acceptance(root, base, card):
                     if status != (101 if p.suffix == ".rs" else 1):
                         continue
                 covered.update(labels)
+    n, rust = card["number"], (root / "Cargo.toml").is_file()
     return [
-        f"Acceptance line {line} of #{card['number']} ({msg}) has no passing regression test. "
-        f"Fix: mark a new test or one that fails on the base with #{card['number']} {line}."
+        f"Acceptance line {line} of #{n} ({msg}) has no passing regression test. "
+        f"Fix: mark a new test, or one that fails on the base, with "
+        + (f"the line `// acceptance: #{n} {line}` directly above its `#[test]`." if rust else
+           f"the decorator `@pytest.mark.acceptance(\"#{n}\", \"{line}\")`.")
         for line, msg in needed.items()
         if line not in covered
     ]
