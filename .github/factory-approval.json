@@ -1,0 +1,15 @@
+{
+  "sensitive": [
+    ".github/workflows/*",
+    ".github/scripts/*",
+    ".github/factory.json",
+    ".github/factory-approval.json",
+    ".github/door_allowed_signers",
+    "tests/acceptance/*",
+    ".agents/skills/**",
+    "custom-codereview-guide.md",
+    ".agents/plugins/**",
+    ".openhands/**"
+  ],
+  "sensitive_exceptions": ["\\.agents/skills/verify-[^/]+/features/.+"]
+}

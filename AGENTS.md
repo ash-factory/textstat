@@ -25,3 +25,11 @@ textstat: a factory project
   - Do not open another pull request and do not convert this one to a draft.
 - Say nothing about another slice, another pull request or another worker's work unless you link the issue, pull request or check you read it from.
 - Never change `tests/acceptance/`, `AGENTS.md` or `.github/`. If one of them is wrong, say so in the pull request.
+
+## Project rules
+
+| Rule | Check or judgement |
+| --- | --- |
+| Run the test suite. | `test` |
+| Keep protected files in reviewed changes. | `guard` |
+| Keep each feature driver with its test. | `feature-map` |

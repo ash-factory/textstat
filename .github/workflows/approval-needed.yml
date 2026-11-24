@@ -1,0 +1,52 @@
+name: Verify factory approval
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  checks: write
+jobs:
+  signatures:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify signatures from the trusted base
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          check_id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/check-runs" -f name=approval-needed -f head_sha="$HEAD" -f status=in_progress --jq .id)
+          status=failure
+          summary='The proposed head could not be fetched and verified.'
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          if GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $auth" git fetch --no-tags origin "refs/pull/$PR/head" && test "$(git rev-parse FETCH_HEAD)" = "$HEAD"; then
+            if evidence=$(python3 -I .github/scripts/approval_needed.py --project . "$BASE" "$HEAD"); then
+              status=success
+              summary='Approval evidence verified.'
+            else
+              summary='Approval evidence verification failed.'
+              case "$evidence" in
+                'The base has no trusted public door signer.'*) summary='The base has no trusted public door signer.' ;;
+              esac
+            fi
+            printf '%s\n' "$evidence"
+          fi
+          attempt=1
+          while ! error=$(gh api -X PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check_id" -f status=completed -f conclusion="$status" -f 'output[title]=Factory approval evidence' -f "output[summary]=$summary" --silent 2>&1); do
+            printf '%s\n' "$error" >&2
+            case "$error" in
+              *" (HTTP 404)"|*" (HTTP 5"[0-9][0-9]")") ;;
+              *) exit 1 ;;
+            esac
+            test "$attempt" -lt 4 || exit 1
+            sleep "$attempt"
+            attempt=$((attempt + 1))
+          done
+          test "$status" = success
