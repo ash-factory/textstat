@@ -1,0 +1,26 @@
+name: The kind's Rust toolchain
+description: >-
+  Installs the Rust toolchain that the project's kind pins in .github/factory.json (`needs`: "cargo <version>"),
+  the same way the kind's own ci.yml does, and fetches the crates that the offline law checks build with.
+runs:
+  using: composite
+  steps:
+    - name: The pinned Rust toolchain and its crates
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=$(python3 -c 'import json; print(*(n.split()[1] for n in json.load(open(".github/factory.json")).get("needs", []) if len(n.split()) == 2 and n.split()[0] == "cargo"))' 2>/dev/null || true)
+        case "$version" in
+          ""|*" "*) echo 'Fix: name one Rust toolchain as "cargo <version>" under needs in .github/factory.json.'; exit 1 ;;
+        esac
+        export PATH="$HOME/.cargo/bin:$PATH"
+        command -v cc >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq gcc libc6-dev; } ||
+          { echo 'Fix: install a C linker (gcc) on this runner.'; exit 1; }
+        if ! cargo --version 2>/dev/null | grep -q "^cargo $version "; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$version" -c rustfmt,clippy ||
+            { echo "Fix: rustup could not install Rust $version on this runner; check its network to sh.rustup.rs."; exit 1; }
+        fi
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        cargo --version
+        cargo fetch || { echo 'Fix: make Cargo.toml and Cargo.lock resolve, or give this runner network to crates.io; the law checks build offline from these crates.'; exit 1; }

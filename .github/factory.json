@@ -3,9 +3,25 @@
   "project_kind": "rust-cli",
   "kind_pack": "factory/kinds/rust-cli@f38130ca4600",
   "evidence": "transcript",
-  "release": {"target": "none"},
-  "required_pr": ["test", "guard", "evidence-replay"],
-  "required_main": ["test", "build"],
-  "test_files": ["src/**/tests.rs", "benches/**"],
-  "needs": ["cargo 1.95.0"]
+  "release": {
+    "target": "none"
+  },
+  "required_pr": [
+    "test",
+    "guard",
+    "evidence-replay",
+    "rules-table",
+    "tests-kept"
+  ],
+  "required_main": [
+    "test",
+    "build"
+  ],
+  "test_files": [
+    "src/**/tests.rs",
+    "benches/**"
+  ],
+  "needs": [
+    "cargo 1.95.0"
+  ]
 }
