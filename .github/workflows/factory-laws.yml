@@ -1,0 +1,202 @@
+name: Factory laws
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  rules-table:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 .agents/plugins/factory-laws/scripts/factory_laws.py rules-table --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA"
+  learn-layer:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 .agents/plugins/factory-laws/scripts/factory_laws.py learn-layer --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA"
+  ratchet:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 .agents/plugins/factory-laws/scripts/factory_laws.py ratchet --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA"
+  feature-map:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Check feature driver tests
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          envdir=$(mktemp -d)
+          trap 'rm -rf "$envdir"' EXIT
+          python -m venv "$envdir"
+          "$envdir/bin/pip" install pytest==8.4.2
+          "$envdir/bin/python" .agents/plugins/factory-laws/scripts/factory_laws.py feature-map --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA"
+  kind-lint:
+    runs-on: [self-hosted, factory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check banned calls and module imports
+        run: |
+          set -eu
+          if test -f Cargo.toml; then
+            cargo clippy --all-targets -- -D clippy::disallowed_methods || { echo 'Fix: remove the banned call or repair the private module access.'; exit 1; }
+          else
+            python3 -m venv "$RUNNER_TEMP/factory-lint-$GITHUB_RUN_ID"
+            tools="$RUNNER_TEMP/factory-lint-$GITHUB_RUN_ID/bin"
+            "$tools/pip" install 'ruff==0.14.6' 'import-linter==2.10'
+            "$tools/ruff" check --select TID251 . || { echo 'Fix: replace the banned call with its permitted wrapper.'; exit 1; }
+            PYTHONPATH=. "$tools/lint-imports" || { echo 'Fix: keep the project module dependency in the direction its contract permits.'; exit 1; }
+          fi
+  tests-kept:
+    runs-on: [self-hosted, factory]
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: hashFiles('Cargo.toml') == ''
+        with:
+          python-version: "3.12"
+      - name: Compare the collected tests
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          REF: ${{ github.event.pull_request.head.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          issue_token=$GH_TOKEN
+          unset GH_TOKEN
+          scratch=$(mktemp -d)
+          before="$scratch/base"
+          trap 'git worktree remove --force "$before" 2>/dev/null || true; rm -rf "$scratch"' EXIT
+          git worktree add --detach "$before" "$BASE"
+          if test -f Cargo.toml; then
+            cargo test --offline -- --list > "$scratch/head-tests"
+            (cd "$before" && cargo test --offline -- --list) > "$scratch/base-tests"
+            missing=$(comm -23 <(grep ': test$' "$scratch/base-tests" | sort -u) <(grep ': test$' "$scratch/head-tests" | sort -u))
+            test -z "$missing" || { echo "Fix: restore the missing Rust tests: $missing"; exit 1; }
+          else
+            python -m venv "$scratch/venv"
+            "$scratch/venv/bin/pip" install pytest==8.4.2
+            card=()
+            if [[ "$REF" =~ ^factory/issue-?([0-9]+)($|[-/]) ]]; then
+              card=(--card "${BASH_REMATCH[1]}")
+            fi
+            GH_TOKEN="$issue_token" "$scratch/venv/bin/python" .github/scripts/tests_kept.py --base-dir "$before" \
+              --head-dir . --base "$BASE" --head "$HEAD" --repo "$GITHUB_REPOSITORY" "${card[@]}" || \
+              { echo 'Fix: restore missing tests or supply the failure issue.'; exit 1; }
+          fi
+  acceptance:
+    runs-on: [self-hosted, factory]
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the linked card
+        env:
+          REF: ${{ github.event.pull_request.head.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if [[ "$REF" =~ ^factory/issue-?([0-9]+)($|[-/]) ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues/${BASH_REMATCH[1]}" --jq '{number,body,labels:[.labels[].name]}' > "$RUNNER_TEMP/acceptance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          else
+            echo '{}' > "$RUNNER_TEMP/acceptance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          fi
+      - name: Check acceptance
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          FACTORY_PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          envdir=$(mktemp -d)
+          trap 'rm -rf "$envdir"' EXIT
+          python3 -m venv "$envdir"
+          "$envdir/bin/pip" install pytest==8.4.2
+          timeout 600 "$envdir/bin/python" .agents/plugins/factory-laws/scripts/smart_tests.py acceptance --base "$BASE" --card "$RUNNER_TEMP/acceptance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+  mutants:
+    timeout-minutes: 10
+    runs-on: [self-hosted, factory]
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the linked card
+        env:
+          REF: ${{ github.event.pull_request.head.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if [[ "$REF" =~ ^factory/issue-?([0-9]+)($|[-/]) ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues/${BASH_REMATCH[1]}" --jq '{number,body,labels:[.labels[].name]}' > "$RUNNER_TEMP/mutants-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          else
+            echo '{}' > "$RUNNER_TEMP/mutants-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          fi
+      - name: Check mutants
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          FACTORY_PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          envdir=$(mktemp -d)
+          trap 'rm -rf "$envdir"' EXIT
+          python3 -m venv "$envdir"
+          "$envdir/bin/pip" install pytest==8.4.2 mutmut==3.8.0
+          if test -f Cargo.toml; then
+            if ! cargo mutants --version 2>/dev/null | grep -qF '27.1.0'; then
+              test "$(uname -m)" = x86_64 || { echo 'Fix: provision cargo-mutants 27.1.0 for this runner architecture.'; exit 1; }
+              curl --fail --silent --show-error --location --max-time 60 https://github.com/sourcefrog/cargo-mutants/releases/download/v27.1.0/cargo-mutants-x86_64-unknown-linux-gnu.tar.gz -o "$envdir/mutants.tar.gz"
+              echo "dfe6dc37d0342c891d2829b5a695aa57c2d0edecef7e7d0399a30cc6e206411e  $envdir/mutants.tar.gz" | sha256sum -c -
+              member=$(tar -tzf "$envdir/mutants.tar.gz" | awk -F/ '$NF=="cargo-mutants" {print}')
+              tar -xOzf "$envdir/mutants.tar.gz" "$member" > "$envdir/bin/cargo-mutants"
+              chmod 755 "$envdir/bin/cargo-mutants"
+              export PATH="$envdir/bin:$PATH"
+            fi
+          fi
+          timeout 600 "$envdir/bin/python" .agents/plugins/factory-laws/scripts/smart_tests.py mutants --base "$BASE" --card "$RUNNER_TEMP/mutants-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"

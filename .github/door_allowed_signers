@@ -1,0 +1,2 @@
+# One host door public key per line, in Git's SSH allowed-signers format.
+# The owner enrolls the first public signer on the trusted base during installation.
